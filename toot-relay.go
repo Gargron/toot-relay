@@ -8,7 +8,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"github.com/sideshow/apns2"
 	"github.com/sideshow/apns2/certificate"
 	"github.com/sideshow/apns2/payload"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 
 	httptrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
@@ -39,8 +39,8 @@ var (
 )
 
 func worker(workerId int) {
-	log.Printf("starting worker %d", workerId)
-	defer log.Printf("stopping worker %d", workerId)
+	log.Info(fmt.Sprintf("starting worker %d", workerId))
+	defer log.Info(fmt.Sprintf("stopping worker %d", workerId))
 
 	var client *apns2.Client
 
@@ -54,17 +54,26 @@ func worker(workerId int) {
 		res, err := client.Push(msg.notification)
 
 		if err != nil {
-			log.Println("Push error:", err)
+			log.Error(fmt.Sprintf("Push error: %s", err))
 			continue
 		}
 
 		if res.Sent() {
-			log.Printf("Sent notification to %s -> %v %v %v", msg.notification.DeviceToken, res.StatusCode, res.ApnsID, res.Reason)
-			log.Println("Expiration:", msg.notification.Expiration)
-			log.Println("Priority:", msg.notification.Priority)
-			log.Println("CollapseID:", msg.notification.CollapseID)
+			log.WithFields(log.Fields{
+				"status-code":  res.StatusCode,
+				"apns-id":      res.ApnsID,
+				"reason":       res.Reason,
+				"device-token": msg.notification.DeviceToken,
+				"expiration":   msg.notification.Expiration,
+				"priority":     msg.notification.Priority,
+				"collapse-id":  msg.notification.CollapseID,
+			}).Info(fmt.Sprintf("Sent notification (%v)", res.StatusCode))
 		} else {
-			log.Printf("Failed to send: %v %v %v\n", res.StatusCode, res.ApnsID, res.Reason)
+			log.WithFields(log.Fields{
+				"status-code": res.StatusCode,
+				"apns-id":     res.ApnsID,
+				"reason":      res.Reason,
+			}).Error(fmt.Sprintf("Failed to send notification (%v)", res.StatusCode))
 		}
 	}
 }
@@ -98,19 +107,19 @@ func main() {
 	if caPEM, err := os.ReadFile(caFile); err == nil {
 		rootCAs = x509.NewCertPool()
 		if ok := rootCAs.AppendCertsFromPEM(caPEM); !ok {
-			log.Fatalf("CA file %s specified but no CA certificates could be loaded\n", caFile)
+			log.Fatal(fmt.Sprintf("CA file %s specified but no CA certificates could be loaded\n", caFile))
 		}
 	}
 
 	if p12base64 != "" {
 		bytes, err := base64.StdEncoding.DecodeString(p12base64)
 		if err != nil {
-			log.Fatal("Base64 decoding error: ", err)
+			log.Fatal(fmt.Sprintf("Base64 decoding error: %s", err))
 		}
 
 		cert, err := certificate.FromP12Bytes(bytes, p12password)
 		if err != nil {
-			log.Fatal("Error parsing certificate: ", err)
+			log.Fatal(fmt.Sprintf("Error parsing certificate: %s", err))
 		}
 
 		developmentClient = apns2.NewClient(cert).Development()
@@ -118,7 +127,7 @@ func main() {
 	} else {
 		cert, err := certificate.FromP12File(p12file, p12password)
 		if err != nil {
-			log.Fatal("Error loading certificate file: ", err)
+			log.Fatal(fmt.Sprintf("Error loading certificate file: %s", err))
 		}
 
 		developmentClient = apns2.NewClient(cert).Development()
@@ -150,7 +159,7 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 	if len(components) < 4 {
 		writer.WriteHeader(500)
 		fmt.Fprintln(writer, "Invalid URL path:", request.URL.Path)
-		log.Println("Invalid URL path:", request.URL.Path)
+		log.Error(fmt.Sprintf("Invalid URL path: %s", request.URL.Path))
 		return
 	}
 
@@ -178,7 +187,7 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 		} else {
 			writer.WriteHeader(500)
 			fmt.Fprintln(writer, "Error retrieving public key:", err)
-			log.Println("Error retrieving public key:", err)
+			log.Error(fmt.Sprintf("Error retrieving public key: %s", err))
 			return
 		}
 
@@ -187,14 +196,14 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 		} else {
 			writer.WriteHeader(500)
 			fmt.Fprintln(writer, "Error retrieving salt:", err)
-			log.Println("Error retrieving salt:", err)
+			log.Error(fmt.Sprintf("Error retrieving salt: %s", err))
 			return
 		}
 	//case "aes128gcm": // No further headers needed. However, not implemented on client side so return 415.
 	default:
 		writer.WriteHeader(415)
 		fmt.Fprintln(writer, "Unsupported Content-Encoding:", request.Header.Get("Content-Encoding"))
-		log.Println("Unsupported Content-Encoding:", request.Header.Get("Content-Encoding"))
+		log.Error(fmt.Sprintf("Unsupported Content-Encoding: %s", request.Header.Get("Content-Encoding")))
 		return
 	}
 
