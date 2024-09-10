@@ -5,7 +5,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
-	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -242,7 +241,7 @@ func encodedValue(header http.Header, name, key string) (string, error) {
 	keyValues := parseKeyValues(header.Get(name))
 	value, exists := keyValues[key]
 	if !exists {
-		return "", errors.New(fmt.Sprintf("Value %s not found in header %s", key, name))
+		return "", fmt.Errorf("value %s not found in header %s", key, name)
 	}
 
 	bytes, err := base64.RawURLEncoding.DecodeString(value)
