@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
@@ -20,12 +21,14 @@ import (
 	"golang.org/x/net/http2"
 
 	httptrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
+	dd_logrus "gopkg.in/DataDog/dd-trace-go.v1/contrib/sirupsen/logrus"
 	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
 type Message struct {
 	isProduction bool
 	notification *apns2.Notification
+	requestLog   *log.Entry // For logging with datadog context
 }
 
 var (
@@ -35,6 +38,7 @@ var (
 	messageChan       chan *Message
 	maxQueueSize      int
 	maxWorkers        int
+	ctx               context.Context
 )
 
 func worker(workerId int) {
@@ -53,12 +57,12 @@ func worker(workerId int) {
 		res, err := client.Push(msg.notification)
 
 		if err != nil {
-			log.Error(fmt.Sprintf("Push error: %s", err))
+			msg.requestLog.Error(fmt.Sprintf("Push error: %s", err))
 			continue
 		}
 
 		if res.Sent() {
-			log.WithFields(log.Fields{
+			msg.requestLog.WithFields(log.Fields{
 				"status-code":  res.StatusCode,
 				"apns-id":      res.ApnsID,
 				"reason":       res.Reason,
@@ -68,7 +72,7 @@ func worker(workerId int) {
 				"collapse-id":  msg.notification.CollapseID,
 			}).Info(fmt.Sprintf("Sent notification (%v)", res.StatusCode))
 		} else {
-			log.WithFields(log.Fields{
+			msg.requestLog.WithFields(log.Fields{
 				"status-code": res.StatusCode,
 				"apns-id":     res.ApnsID,
 				"reason":      res.Reason,
@@ -78,12 +82,14 @@ func worker(workerId int) {
 }
 
 func main() {
-	tracer.Start(
-		tracer.WithService("webpush-apn-relay"),
-	)
+	tracer.Start()
 	defer tracer.Stop()
 
 	mux := httptrace.NewServeMux()
+
+	log.AddHook(&dd_logrus.DDContextLogHook{})
+
+	ctx = context.Background()
 
 	flag.IntVar(&maxQueueSize, "max-queue-size", 4096, "Maximum number of messages to queue")
 	flag.IntVar(&maxWorkers, "max-workers", 8, "Maximum number of workers")
@@ -153,12 +159,17 @@ func main() {
 }
 
 func handler(writer http.ResponseWriter, request *http.Request) {
+	span, sctx := tracer.StartSpanFromContext(ctx, "web.request", tracer.ResourceName(request.RequestURI))
+	defer span.Finish()
+
+	requestLog := log.WithContext(sctx)
+
 	components := strings.Split(request.URL.Path, "/")
 
 	if len(components) < 4 {
 		writer.WriteHeader(500)
 		fmt.Fprintln(writer, "Invalid URL path:", request.URL.Path)
-		log.Error(fmt.Sprintf("Invalid URL path: %s", request.URL.Path))
+		requestLog.Error(fmt.Sprintf("Invalid URL path: %s", request.URL.Path))
 		return
 	}
 
@@ -186,7 +197,7 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 		} else {
 			writer.WriteHeader(500)
 			fmt.Fprintln(writer, "Error retrieving public key:", err)
-			log.Error(fmt.Sprintf("Error retrieving public key: %s", err))
+			requestLog.Error(fmt.Sprintf("Error retrieving public key: %s", err))
 			return
 		}
 
@@ -195,14 +206,14 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 		} else {
 			writer.WriteHeader(500)
 			fmt.Fprintln(writer, "Error retrieving salt:", err)
-			log.Error(fmt.Sprintf("Error retrieving salt: %s", err))
+			requestLog.Error(fmt.Sprintf("Error retrieving salt: %s", err))
 			return
 		}
 	//case "aes128gcm": // No further headers needed. However, not implemented on client side so return 415.
 	default:
 		writer.WriteHeader(415)
 		fmt.Fprintln(writer, "Unsupported Content-Encoding:", request.Header.Get("Content-Encoding"))
-		log.Error(fmt.Sprintf("Unsupported Content-Encoding: %s", request.Header.Get("Content-Encoding")))
+		requestLog.Error(fmt.Sprintf("Unsupported Content-Encoding: %s", request.Header.Get("Content-Encoding")))
 		return
 	}
 
@@ -223,7 +234,7 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 		notification.Priority = apns2.PriorityHigh
 	}
 
-	messageChan <- &Message{isProduction, notification}
+	messageChan <- &Message{isProduction, notification, requestLog}
 
 	// always reply w/ success, since we don't know how apple responded
 	writer.WriteHeader(201)
